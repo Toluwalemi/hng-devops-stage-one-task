@@ -2,7 +2,8 @@
 
 # Define the log file and password file paths
 LOGFILE="/var/log/user_management.log"
-PASSWORD_FILE="/var/secure/user_passwords.csv"
+PASSWORD_FILE="/var/secure/user_passwords.txt"
+SECURE_DIR="/var/secure/"
 
 # Ensure the script is run with root permissions
 if [[ $EUID -ne 0 ]]; then
@@ -16,27 +17,16 @@ log_action() {
   echo "$message" | tee -a "$LOGFILE"
 }
 
-# Check if the log file exists, create it if it doesn't, and set the correct permissions
-if [[ ! -f "$LOGFILE" ]]; then
-  touch "$LOGFILE"
-  log_action "Created log file: $LOGFILE"
-else
-  log_action "Log file already exists, skipping creation of logfile ' $LOGFILE ' "
-fi
-  log_action "Setting permissions for password file: $PASSWORD_FILE"
-chmod 600 "$LOGFILE"
-log_action "Successfully set"
 
-# Check if the password file exists, create it if it doesn't, and set the correct permissions
-if [[ ! -f "$PASSWORD_FILE" ]]; then
-  touch "$PASSWORD_FILE"
-  log_action "Created password file: $PASSWORD_FILE"
-else
-  log_action "Password file already exists, skipping creating of password file ' $PASSWORD_FILE ' "
-fi
-  log_action "Setting permissions for password file: $PASSWORD_FILE"
-chmod 600 "$PASSWORD_FILE"
-log_action "Successfully set"
+# Function to check if a group already exists
+does_group_exists() {
+    local group_name=$1
+    if getent group "$group_name" > /dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
 
 # Function to generate random passwords
 generate_password() {
@@ -44,58 +34,27 @@ generate_password() {
   tr -dc A-Za-z0-9 </dev/urandom | head -c $password_length
 }
 
+# Check if the log file exists, create it if it doesn't, and set the correct permissions
+if [[ ! -f "$LOGFILE" ]]; then
+  touch "$LOGFILE"
+  log_action "Created log file: $LOGFILE"
+else
+  log_action "Log file already exists, skipping creation of logfile ' $LOGFILE ' "
+fi
 
-create_user() {
-  local username="$1"
-  local groups="$2"
-
-  log_action "Processing user: $username with groups: $groups"
-
-  # Check if the user already exists
-  if id "$username" &>/dev/null; then
-    log_action "User $username already exists, skipping creation"
-    return 1
-  fi
-
-  # Create the user with a home directory
-  useradd -m "$username"
-  if [[ $? -ne 0 ]]; then
-    log_action "Failed to create user: $username"
-    return 1
-  fi
-
-  # Create a personal group for the user
-  groupadd "$username"
-  if [[ $? -ne 0 ]]; then
-    log_action "Failed to create group: $username"
-    return 1
-  fi
-
-  # Add the user to the personal group
-  usermod -aG "$username" "$username"
-
-  # Add the user to additional groups
-  IFS=',' read -ra ADDR <<< "$groups"
-  for group in "${ADDR[@]}"; do
-    groupadd "$group" 2>/dev/null
-    usermod -aG "$group" "$username"
-  done
-
-  # Set up home directory permissions
-  chown -R "$username":"$username" "/home/$username"
-  chmod 700 "/home/$username"
-
-  # Generate a password and set it for the user
-  password=$(generate_password)
-  echo "$username:$password" | chpasswd
-
-  # Log the user creation and password
-  log_action "Created user: $username with groups: $groups"
-  echo "$username,$password" >> "$PASSWORD_FILE"
-}
+# Check if the password file exists, create it if it doesn't, and set the correct permissions
+if [[ ! -f "$PASSWORD_FILE" ]]; then
+  mkdir -p SECURE_DIR
+  touch "$PASSWORD_FILE"
+  log_action "Created password file: $PASSWORD_FILE"
+  chmod 600 "$PASSWORD_FILE"
+  log_action "Password file permissions set to 600: $PASSWORD_FILE"
+else
+  log_action "Password file already exists, skipping creation of password file: $PASSWORD_FILE"
+fi
 
 # Define a function to read the file
-read_file() {
+create_user_groups_from_file() {
   local filename="$1"  # The filename is passed as an argument to the function
 
   # Check if the file exists
@@ -105,15 +64,62 @@ read_file() {
   fi
 
   # Read the file line by line
-  while IFS= read -r line; do
+  while IFS=';' read -r username groups; do
     # Remove whitespace and extract user and groups
-    local user=$(echo "$line" | cut -d ';' -f 1 | xargs)  # Declares 'user' as local
-    local groups=$(echo "$line" | cut -d ';' -f 2 | xargs)  # Declares 'groups' as local
+    username=$(echo "$username" | xargs)
+    groups=$(echo "$groups" | tr -d ' ')
 
-    # Create the user and groups
-    create_user "$user" "$groups"
+  # Check if the user already exists
+  if ! id "$username" &>/dev/null; then
+    # Create the user with a home directory
+    useradd -m -s /bin/bash "$username"
+    if [[ $? -ne 0 ]]; then
+        echo "ERROR: Failed to create user $username." >> "$LOG_FILE"
+        continue
+    fi
+        log_action "User $username created."
+
+    # Generate a password and set it for the user
+    password=$(generate_password)
+    # and set password
+    echo "$username:$password" | chpasswd
+    echo "$username,$password" >> "$PASSWORD_FILE"
+    log_action "Created user: $username"
+  else
+    log_action "User $username already exists, skipping creation"
+  fi
+
+  # Create a personal group for the user if it doesn't exist
+  if ! does_group_exists "$username"; then
+        groupadd "$username"
+        log_action "Successfully created group: $username"
+        usermod -aG "$username" "$username"
+        log_action "User: $username added to Group: $username"
+    else
+        log_action "User: $username added to Group: $username"
+    fi
+
+ 
+  # Add the user to additional groups
+  IFS=',' read -r -a group_lst <<< "$groups"
+  for group in "${group_lst[@]}"; do
+    if ! does_group_exists "$group"; then
+            # Create the group if it does not exist
+            groupadd "$group"
+            log_action "Successfully created Group: $group"
+        else
+            log_action "Group: $group already exists"
+        fi
+        # Add the user to the group
+        usermod -aG "$group" "$username"
+   done
+
+  # Set up home directory permissions
+  chown -R "$username:$username" "/home/$username"
+  chmod 700 "/home/$username"
+
   done < "$filename"
 }
 
 # Call the function with the filename passed as a script argument
-read_file "$1"
+create_user_groups_from_file "$1"
