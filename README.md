@@ -1,4 +1,4 @@
-# HNG Internship DevOps Stage Zero Submission
+# HNG Internship DevOps Stage Two Submission
 
 ## Project Overview
 
